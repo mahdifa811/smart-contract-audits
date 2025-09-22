@@ -15,7 +15,7 @@
 **Project**: [CrowdFunding](https://github.com/hassan4702/crowdfunding) by Hassan Shakil  
 **Type**: Non-production, personal learning project  
 **Findings**: 9 issues (3 High, 2 Medium, 3 Low, 1 Informational)  
-**Report**: [Full Report](crowd-funding/audit-report.md) | [PDF](crowd-funding/audit-report.pdf)  
+**Report**: [Full Report](audits/crowd-funding/audit-report.md) | [PDF](audits/crowd-funding/audit-report.pdf)  
 **Key Findings**:
 - **Reentrancy in refund process** (High): Double-spending vulnerability
 - **Campaign ID overlap** (High): Data overwriting due to ID reuse
