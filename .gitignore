@@ -1,0 +1,15 @@
+# OS Files
+.DS_Store
+Thumbs.db
+
+# IDE Files
+.vscode/
+.idea/
+*.swp
+
+# Generated Files
+*.pdf
+*.log
+
+# Dependencies
+node_modules/
