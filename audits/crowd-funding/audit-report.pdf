@@ -1,0 +1,246 @@
+# Security Audit Report for CrowdFunding Smart Contract
+
+## Auditor Information
+- **Auditor**: [Your Name]
+- **Date**: August 27, 2025
+- **Contact**: [Your Email] or GitHub ([Your GitHub Username])
+
+## Introduction
+This report details the findings from a security audit of the `CrowdFunding.sol` smart contract. The audit was conducted voluntarily and for free to contribute to the blockchain community and build my auditing portfolio. I have experience in platforms like Sherlock and Code4rena, where I have identified 11 High-severity and 6 Medium-severity vulnerabilities.
+
+The contract is a crowdfunding platform allowing users to create, donate to, and manage campaigns. The audit focused on identifying vulnerabilities in fund management, access control, logical flaws, and other potential issues.
+
+## Scope
+- **Contract**: CrowdFunding.sol
+- **Version**: pragma solidity ^0.8.19
+- **Libraries**: OpenZeppelin Ownable, SafeMath
+
+## Methodology
+- **Manual Code Review**: Thorough examination of the code for logical flaws, access control issues, and vulnerabilities.
+- **Static Analysis**: Tools like Slither were used to detect common patterns such as reentrancy and overflow.
+- **Dynamic Testing**: Simulated scenarios to verify findings.
+- **Best Practices**: Comparison with standards like SWC (Smart Contract Weakness Classification) and OpenZeppelin guidelines.
+
+## Executive Summary
+The audit identified 8 issues:
+- 3 High-severity vulnerabilities related to fund management and campaign ID handling.
+- 1 Medium-severity logical error in donation limits.
+- 3 Low-severity issues in event emission, tax calculation, and halt bypassing.
+- 1 Informational issue in data retrieval.
+
+All issues are detailed below with recommendations. Addressing these will significantly enhance the contract's security and reliability.
+
+## Findings
+
+### Finding 1: Reentrancy Vulnerability in Refund Process
+**Severity**: High  
+**Status**: Open  
+**Description**: In the `_refundDonators` function called by `deleteCampaign`, the `amountCollected` variable is updated after external calls to `_payTo`. This allows a malicious campaign owner to reenter the `payOutToCampaignTeam` function during the refund process, enabling double-spending of the campaign’s funds (refund + payout minus tax).  
+**Impact**: The contract may lose funds allocated to other campaigns, leading to financial loss for the platform.  
+**Proof of Concept**: 
+- Create a campaign.
+- Donate 1 ETH as the owner.
+- Call `deleteCampaign` and reenter `payOutToCampaignTeam` during `_payTo`.  
+**Recommendation**: Update `amountCollected` to zero before external calls or use OpenZeppelin's `ReentrancyGuard`.  
+**Code Reference**:
+```solidity
+function _refundDonators(uint _id) internal {
+    uint256 donationAmount;
+    Campaign storage campaign = campaigns[_id];
+    campaign.amountCollected = 0; // Move this before the loop
+    for (uint i; i < campaign.donators.length; i++) {
+        donationAmount = campaign.donations[i];
+        campaign.donations[i] = 0;
+        _payTo(campaign.donators[i], donationAmount);
+    }
+}
+```
+
+### Finding 2: Logical Flaw in deleteCampaign Allowing Double-Spending
+**Severity**: High  
+**Status**: Open  
+**Description**: The `deleteCampaign` function does not check if `campaigns[_id].payedOut` is `true` before calling `_refundDonators`. If a campaign owner calls `payOutToCampaignTeam` to withdraw funds and then calls `deleteCampaign`, the contract refunds donators again using the contract’s balance.  
+**Impact**: This leads to double-spending, depleting the contract’s balance and affecting other campaigns’ payouts or refunds.  
+**Proof of Concept**: 
+- Create a campaign and donate.
+- Call `payOutToCampaignTeam` to withdraw.
+- Call `deleteCampaign` to trigger additional refunds.  
+**Recommendation**: Reset `amountCollected` to zero in `payOutToCampaignTeam` before transferring funds.  
+**Code Reference**:
+```solidity
+function payOutToCampaignTeam(uint256 _id) external privilageEntity(_id) notInEmergency returns (bool) {
+    if (campaigns[_id].payedOut == true) revert("Funds withdrawed before");
+    if (msg.sender != address(owner())) {
+        if (campaigns[_id].deadline > block.timestamp) {
+            revert DeadLine({
+                campaingDeadline: campaigns[_id].deadline,
+                requestTime: block.timestamp
+            });
+        }
+    }
+    campaigns[_id].payedOut = true;
+    (uint256 raisedAmount, uint256 taxAmount) = _calculateTax(_id);
+    campaigns[_id].amountCollected = 0; // Reset amountCollected
+    _payTo(campaigns[_id].owner, (raisedAmount - taxAmount));
+    _payPlatformFee(taxAmount);
+    emit Action(_id, "Funds Withdrawal", msg.sender, block.timestamp);
+    return true;
+}
+```
+
+### Finding 3: Campaign ID Overlap Due to Decrementing numberOfCampaigns
+**Severity**: High  
+**Status**: Open  
+**Description**: The `deleteCampaign` function decrements `numberOfCampaigns`, causing new campaign IDs to overlap with existing ones, overwriting their data. For example, if `numberOfCampaigns` is 10, a new campaign gets ID 10, and after a deletion it drops to 9, the next campaign will reuse ID 10, overriding the existing campaign.  
+**Impact**: Loss of existing campaign data and funds, compromising the contract’s integrity.  
+**Proof of Concept**: 
+- Create campaigns to reach ID 10.
+- Delete a different campaign to decrement.
+- Create a new campaign that overrides ID 10.  
+**Recommendation**: Remove `numberOfCampaigns -= 1` from `deleteCampaign` to ensure unique IDs.  
+**Code Reference**:
+```solidity
+function deleteCampaign(uint256 _id) external privilageEntity(_id) notInEmergency returns (bool) {
+    require(campaigns[_id].owner > address(0), "No campaign exist with this ID");
+    if (campaigns[_id].amountCollected > 0 && !campaigns[_id].payedOut) {
+        _refundDonators(_id);
+    }
+    delete campaigns[_id];
+    emit Action(_id, "Campaign Deleted", msg.sender, block.timestamp);
+    // Remove: numberOfCampaigns -= 1;
+    return true;
+}
+```
+
+### Finding 4: Incorrect Campaign ID in Action Event of createCampaign
+**Severity**: Low  
+**Status**: Open  
+**Description**: In the `createCampaign` function, the `Action` event emits `numberOfCampaigns` as the campaign ID, which is incorrect since the actual ID is `numberOfCampaigns - 1`. This causes external systems or UIs to receive incorrect campaign IDs.  
+**Impact**: Confusion in user interfaces or external systems, with no direct financial impact.  
+**Proof of Concept**: 
+- Create a campaign and observe the emitted ID is off by 1.  
+**Recommendation**: Change the event to emit `numberOfCampaigns - 1`.  
+**Code Reference**:
+```solidity
+function createCampaign(...) external ... returns (uint256) {
+    require(block.timestamp < _deadline, "Deadline must be in the future");
+    Campaign storage campaign = campaigns[numberOfCampaigns];
+    numberOfCampaigns++;
+    // ... (other assignments)
+    emit Action(
+        numberOfCampaigns - 1,
+        "Campaign Created",
+        msg.sender,
+        block.timestamp
+    );
+    return numberOfCampaigns - 1;
+}
+```
+
+### Finding 5: Incorrect Logic in Donation Limit Check in donateToCampaign
+**Severity**: Medium  
+**Status**: Open  
+**Description**: In the `donateToCampaign` function, the condition `campaign.amountCollected > campaign.amountCollected.add(amount)` is always false, allowing donations to exceed the campaign’s `target`.  
+**Impact**: Collection of funds beyond the campaign’s target, violating the intended logic and potentially causing user confusion.  
+**Proof of Concept**: 
+- Donate an amount that exceeds the target; the transaction succeeds.  
+**Recommendation**: Change the condition to `campaign.amountCollected.add(amount) > campaign.target`.  
+**Code Reference**:
+```solidity
+function donateToCampaign(uint256 _id) external payable notInEmergency {
+    if (msg.value == 0 wei)
+        revert LowEtherAmount({minAmount: 1 wei, payedAmount: msg.value});
+    Campaign storage campaign = campaigns[_id];
+    if (campaigns[_id].payedOut == true) revert("Funds withdrawed before");
+    require(campaign.owner > address(0), "No campaign exist with this ID");
+    if (campaign.deadline < block.timestamp) {
+        revert DeadLine({
+            campaingDeadline: campaigns[_id].deadline,
+            requestTime: block.timestamp
+        });
+    }
+    uint256 amount = msg.value;
+    if (campaign.amountCollected.add(amount) > campaign.target)
+        revert("Target amount has reached");
+    campaign.amountCollected = campaign.amountCollected.add(amount);
+    campaign.donators.push(msg.sender);
+    campaign.donations.push(amount);
+    emit Action(_id, "Donation To The Campaign", msg.sender, block.timestamp);
+}
+```
+
+### Finding 6: Potential Rounding Errors in _calculateTax Due to Low Precision
+**Severity**: Low  
+**Status**: Open  
+**Description**: The tax calculation in `_calculateTax` uses a denominator of 100, leading to rounding errors (e.g., 0.9 wei lost in tax for 1,234,567,890,123,456,789 wei raised).  
+**Impact**: Minor financial inaccuracies for the platform, potentially accumulating over many campaigns.  
+**Proof of Concept**: 
+- Simulate tax calculation with non-multiple-of-100 amounts; observe rounding down.  
+**Recommendation**: Use a higher denominator (e.g., 10,000) for better precision.  
+**Code Reference**:
+```solidity
+uint256 constant TAX_DENOMINATOR = 10000; // 100.00%
+uint8 public platformTax = 10; // Adjust to uint256 if needed, e.g., 1000 for 10.00%
+function _calculateTax(uint256 _id) internal view returns (uint256, uint256) {
+    uint256 raisedAmount = campaigns[_id].amountCollected;
+    uint256 taxAmount = (raisedAmount * (platformTax * 100)) / TAX_DENOMINATOR; // Adjust for precision
+    return (raisedAmount, taxAmount);
+}
+```
+
+### Finding 7: Bypassing Campaign Halt in updateCampaign When amountCollected is Zero
+**Severity**: Low  
+**Status**: Open  
+**Description**: A campaign owner can bypass a halt applied via `haltCampaign` by calling `updateCampaign` to reset the `deadline`, but only if `amountCollected` is zero.  
+**Impact**: Undermines the contract owner's control over halting campaigns, though limited to unfunded campaigns.  
+**Proof of Concept**: 
+- Halt a new campaign.
+- Update the deadline via `updateCampaign` (possible since `amountCollected == 0`).  
+**Recommendation**: Add a check in `updateCampaign` to prevent deadline changes if halted (e.g., add an `isHalted` flag).  
+**Code Reference**:
+```solidity
+// Add a new field to Campaign struct: bool isHalted;
+function haltCampaign(uint256 _id) external onlyOwner {
+    campaigns[_id].deadline = block.timestamp;
+    campaigns[_id].isHalted = true;
+    emit Action(_id, "Campaign halted", msg.sender, block.timestamp);
+}
+
+function updateCampaign(...) external ... {
+    require(!campaign.isHalted, "Campaign is halted and cannot be updated");
+    // ... (rest of function)
+}
+```
+
+### Finding 8: Inclusion of Deleted and Paid-Out Campaigns in getCampaigns Output
+**Severity**: Informational  
+**Status**: Open  
+**Description**: The `getCampaigns` function returns all campaigns, including deleted (with default values) and paid-out ones, without filtering.  
+**Impact**: Potential confusion for users or UIs expecting only active campaigns.  
+**Proof of Concept**: 
+- Delete or payout a campaign and call `getCampaigns`; observe inclusion.  
+**Recommendation**: Add filtering for active campaigns (e.g., check `owner != address(0)` and `!payedOut`). Optionally, implement pagination.  
+**Code Reference**:
+```solidity
+function getCampaigns() external view returns (Campaign[] memory) {
+    Campaign[] memory allCampaigns = new Campaign[](numberOfCampaigns);
+    uint256 activeCount = 0;
+    for (uint i = 0; i < numberOfCampaigns; i++) {
+        if (campaigns[i].owner != address(0) && !campaigns[i].payedOut) {
+            allCampaigns[activeCount] = campaigns[i];
+            activeCount++;
+        }
+    }
+    // Resize array to active count if needed
+    return allCampaigns; // Or return a filtered array
+}
+```
+
+## Conclusion
+The CrowdFunding contract has significant security and logical issues that could impact its usability and integrity. Prioritizing the High-severity findings is recommended. I am available for further discussion or assistance in implementing these recommendations.
+
+Thank you for the opportunity to audit this contract.
+
+Best regards,  
+[Your Name]  
+Smart Contract Auditor
